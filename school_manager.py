@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import html as html_lib
 import hmac
 import json
 import re
@@ -24,8 +25,16 @@ import zipfile
 from datetime import date, datetime, timedelta
 from pathlib import Path
 import tkinter as tk
-from tkinter import ttk, messagebox, filedialog, simpledialog
+import tkinter.font as tkfont
+from tkinter import ttk, messagebox, filedialog, simpledialog, colorchooser
 from functools import lru_cache
+
+try:
+    from PIL import Image, ImageTk
+    PIL_AVAILABLE = True
+except Exception:
+    Image = ImageTk = None
+    PIL_AVAILABLE = False
 
 # Tk on some systems does not shape Arabic or apply its right-to-left display order.
 # These small UI-only helpers fix display labels/tables while keeping database values logical.
@@ -42,11 +51,30 @@ _ARABIC_RANGE = re.compile(r"[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]")
 
 @lru_cache(maxsize=8192)
 def display_arabic_text(value):
-    """Return a visual RTL/shaped version for display only; never use it for storage."""
-    if not isinstance(value, str) or not _ARABIC_RANGE.search(value) or not _ARABIC_DISPLAY_AVAILABLE:
+    """Convert logical Arabic to a Tk-safe visual string exactly once.
+
+    Tk widgets on Windows may not perform Arabic joining and bidirectional layout
+    consistently. The reshaper creates the proper contextual glyph forms and
+    python-bidi orders mixed RTL/LTR text for display. Database values must remain
+    logical Unicode; use this helper only for display strings. A guard makes it
+    idempotent when a display value passes through more than one UI wrapper.
+    """
+    if not isinstance(value, str) or not value or not _ARABIC_RANGE.search(value):
+        return value
+    # Windows/Tk uses the operating system's native text layout. Pre-reversing
+    # strings there causes exactly the garbled/reversed words users reported.
+    # Only shape/reorder on X11/Linux, where Tk commonly lacks full RTL shaping.
+    if sys.platform.startswith("win") or sys.platform == "darwin":
+        return value
+    # Arabic Presentation Forms show that the value has already been reshaped.
+    # Don't reshape it again when it passes a label/table wrapper a second time.
+    if any(0xFB50 <= ord(ch) <= 0xFDFF or 0xFE70 <= ord(ch) <= 0xFEFF for ch in value):
+        return value
+    if not _ARABIC_DISPLAY_AVAILABLE:
         return value
     try:
-        return _bidi_get_display(arabic_reshaper.reshape(value), base_dir="R")
+        reshaped = arabic_reshaper.reshape(value)
+        return _bidi_get_display(reshaped, base_dir="R")
     except Exception:
         return value
 
@@ -138,7 +166,7 @@ _install_ttk_display_helpers()
 from updater import UpdateService, UpdateError, is_newer
 
 APP_NAME = "مدرستي Pro — نظام إدارة المدارس"
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.3.0"
 APP_VENDOR = "SchoolManagerPro"
 APP_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
 RESOURCE_DIR = Path(getattr(sys, "_MEIPASS", APP_DIR))
@@ -164,6 +192,64 @@ DB_PATH = DATA_DIR / "school_manager.db"
 LOGS_DIR = DATA_DIR / "logs"
 for directory in (DATA_DIR, ATTACHMENTS_DIR, BACKUPS_DIR, LOGS_DIR):
     directory.mkdir(parents=True, exist_ok=True)
+
+
+PRINT_DIR = DATA_DIR / "printouts"
+PRINT_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def render_print_html(title, headers, rows, school_name="مدرستي", font_family="Tahoma"):
+    # Render a proper Arabic/RTL print page from logical database values.
+    safe_title = html_lib.escape(str(title or "تقرير المدرسة"))
+    safe_school = html_lib.escape(str(school_name or "مدرستي"))
+    safe_font = html_lib.escape(str(font_family or "Tahoma"), quote=True)
+    head_html = "".join(f"<th>{html_lib.escape(str(h if h is not None else ''))}</th>" for h in headers)
+    body_rows = []
+    for row in rows:
+        cells = "".join(f"<td>{html_lib.escape(str(value if value is not None else ''))}</td>" for value in row)
+        body_rows.append(f"<tr>{cells}</tr>")
+    if not body_rows:
+        body_rows.append(f'<tr><td class="empty" colspan="{max(1, len(headers))}">لا توجد سجلات للطباعة.</td></tr>')
+    return f'''<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{safe_title}</title>
+<style>
+@page {{ size: A4 landscape; margin: 12mm; }}
+* {{ box-sizing: border-box; }}
+body {{ direction: rtl; text-align: right; font-family: "{safe_font}", Tahoma, Arial, sans-serif; color: #1b2d3d; margin: 0; font-size: 12pt; }}
+header {{ border-bottom: 3px solid #168b88; margin-bottom: 14px; padding: 0 0 10px; }}
+h1 {{ font-size: 20pt; margin: 0 0 5px; color: #123653; }}
+.meta {{ color: #516578; font-size: 10pt; }}
+table {{ direction: rtl; border-collapse: collapse; width: 100%; margin-top: 12px; }}
+th, td {{ border: 1px solid #c9d7e2; padding: 7px 8px; text-align: right; vertical-align: top; overflow-wrap: anywhere; }}
+th {{ background: #e2edf5; color: #123653; font-weight: bold; }}
+tr:nth-child(even) td {{ background: #f4f8fb; }}
+.empty {{ text-align: center; padding: 24px; color: #667; }}
+.actions {{ margin: 10px 0; }}
+button {{ border: 0; border-radius: 5px; padding: 8px 14px; background: #168b88; color: white; font-size: 11pt; cursor: pointer; }}
+@media print {{ .actions {{ display: none; }} }}
+</style>
+</head>
+<body>
+<header><h1>{safe_school}</h1><div><strong>{safe_title}</strong></div><div class="meta">تاريخ الطباعة: {datetime.now():%Y-%m-%d %H:%M}</div></header>
+<div class="actions"><button onclick="window.print()">طباعة</button></div>
+<table><thead><tr>{head_html}</tr></thead><tbody>{''.join(body_rows)}</tbody></table>
+<script>window.addEventListener('load', () => setTimeout(() => window.print(), 450));</script>
+</body></html>'''
+
+
+def open_print_preview(title, headers, rows, school_name="مدرستي", font_family="Tahoma", parent=None):
+    # Write a persistent UTF-8 print view and open it in the default browser.
+    PRINT_DIR.mkdir(parents=True, exist_ok=True)
+    slug = re.sub(r"[^A-Za-z0-9_-]+", "_", str(title)).strip("_")[:36] or "report"
+    path = PRINT_DIR / f"{slug}_{datetime.now():%Y%m%d_%H%M%S}_{uuid.uuid4().hex[:5]}.html"
+    path.write_text(render_print_html(title, headers, rows, school_name, font_family), encoding="utf-8")
+    opened = webbrowser.open(path.resolve().as_uri())
+    if not opened:
+        messagebox.showinfo("تم إعداد معاينة الطباعة", f"تم إنشاء صفحة الطباعة هنا:\n{path}\nافتح الملف واضغط Ctrl+P للطباعة.", parent=parent)
+    return path
 
 
 def _migrate_legacy_data() -> None:
@@ -193,7 +279,7 @@ _migrate_legacy_data()
 DAYS = ["الأحد", "الاثنين", "الثلاثاء", "الأربعاء", "الخميس", "الجمعة", "السبت"]
 ATTENDANCE_STATUSES = ["حاضر", "غائب", "متأخر", "إجازة"]
 PERSON_STATUSES = ["فعّال", "غير فعّال", "منقول", "متخرج"]
-DOCUMENT_CATEGORIES = ["بطاقة وطنية / هوية", "شهادة ميلاد", "وثيقة دراسية", "درجات", "نقل مدرسي", "موافقة ولي الأمر", "شهادة أو كتاب رسمي", "أخرى"]
+DOCUMENT_CATEGORIES = ["بطاقة وطنية / هوية", "شهادة ميلاد", "وثيقة دراسية", "درجات", "نقل مدرسي", "موافقة ولي الأمر", "شهادة أو كتاب رسمي", "صورة مدرسية / أرشيفية", "أخرى"]
 
 SCHEMA = """
 PRAGMA foreign_keys = ON;
@@ -382,6 +468,7 @@ class EntityManager:
         ttk.Label(toolbar, text="💡 انقر مرتين على السجل لتعديله في الحقول أعلاه", style="Hint.TLabel").pack(side="right", padx=12)
         search.bind("<KeyRelease>", lambda _e: self.refresh())
         ttk.Button(toolbar, text="تحديث", command=self.refresh).pack(side="right", padx=3)
+        ttk.Button(toolbar, text="🖨️ طباعة القائمة", command=self.print_records).pack(side="left", padx=3)
         ttk.Button(toolbar, text="تصدير CSV", command=self.export_csv).pack(side="left", padx=3)
         if cfg.get("table") == "students":
             ttk.Button(toolbar, text="قالب CSV للطلاب", command=self.student_template).pack(side="left", padx=3)
@@ -449,6 +536,7 @@ class EntityManager:
         grid_frame.columnconfigure(0, weight=1)
         self.tree.bind("<<TreeviewSelect>>", self.load_selected)
         self.tree.bind("<Double-1>", self.load_selected)
+        self.tree.bind("<MouseWheel>", lambda event: self.tree.yview_scroll(-1 * int(event.delta / 120), "units"))
         self.empty_hint = ttk.Label(
             grid_frame, text=self._empty_message(), style="EmptyState.TLabel",
             justify="center", anchor="center"
@@ -682,6 +770,27 @@ class EntityManager:
                 if val is not None:
                     widget.insert(0, str(val))
 
+    def print_records(self):
+        """Print the same filtered list currently shown in this manager."""
+        query = self.config["list_query"]
+        params = []
+        search = self.search_var.get().strip()
+        search_fields = self.config.get("search_fields", [])
+        if search and search_fields:
+            where = " OR ".join(f"{field} LIKE ?" for field in search_fields)
+            query += f" WHERE {where}" if " WHERE " not in query.upper() else f" AND ({where})"
+            params = [f"%{search}%"] * len(search_fields)
+        query += f" ORDER BY {self.config.get('order_by', 'id DESC')}"
+        try:
+            records = self.db.query(query, params)
+            columns = self.config["display_columns"]
+            headers = [heading for _col, heading, _width in columns]
+            rows = [[record[col] if record[col] is not None else "" for col, _heading, _width in columns] for record in records]
+            school = self.app.school_settings().get("name", "مدرستي")
+            open_print_preview(f"قائمة {self.config['title']}", headers, rows, school, self.app.font_family, parent=self.frame)
+        except Exception as exc:
+            messagebox.showerror("تعذّرت معاينة الطباعة", str(exc), parent=self.frame)
+
     def export_csv(self):
         path = filedialog.asksaveasfilename(parent=self.frame, title="حفظ البيانات بصيغة CSV", defaultextension=".csv", filetypes=[("CSV", "*.csv")], initialfile=f"{self.table}_{today_text()}.csv")
         if not path:
@@ -796,6 +905,7 @@ class AttendanceTab:
         self.class_combo.pack(side="right", padx=5)
         self.class_combo.bind("<<ComboboxSelected>>", lambda _e: self.load_roster())
         ttk.Button(filters, text="عرض الطلبة", command=self.load_roster).pack(side="right", padx=5)
+        ttk.Button(filters, text="🖨️ طباعة الكشف", command=self.print_roster).pack(side="left", padx=5)
         ttk.Button(filters, text="تسجيل الجميع حاضرين", command=self.mark_all_present).pack(side="left", padx=5)
 
         editor = ttk.LabelFrame(self.frame, text="📝 تسجيل حالة الطالب المحدد", padding=10)
@@ -832,6 +942,7 @@ class AttendanceTab:
         grid.columnconfigure(0, weight=1)
         self.tree.bind("<<TreeviewSelect>>", self.select_student)
         self.tree.bind("<Double-1>", self.select_student)
+        self.tree.bind("<MouseWheel>", lambda event: self.tree.yview_scroll(-1 * int(event.delta / 120), "units"))
         self.empty_hint = ttk.Label(
             grid, text="أضف الصفوف والشعب، ثم سجّل الطلاب حتى تظهر الأسماء هنا.",
             style="EmptyState.TLabel", justify="center", anchor="center"
@@ -839,6 +950,24 @@ class AttendanceTab:
         self.empty_hint.place(relx=0.5, rely=0.5, anchor="center")
         self.summary = ttk.Label(self.frame, text="", style="Hint.TLabel")
         self.summary.pack(anchor="e", pady=(7, 0))
+
+    def print_roster(self):
+        if not self._valid_date():
+            messagebox.showwarning("تاريخ غير صحيح", "اكتب التاريخ بصيغة YYYY-MM-DD.", parent=self.frame)
+            return
+        class_id = self.class_map.get(self.class_var.get())
+        if not class_id:
+            messagebox.showinfo("اختر صفاً", "أضف الصف والشعبة ثم اخترهما قبل الطباعة.", parent=self.frame)
+            return
+        records = self.db.query("""SELECT s.student_no,s.full_name,COALESCE(c.grade,'') grade,COALESCE(c.section,'') section,
+            COALESCE(a.status,'غير مسجل') status,COALESCE(a.note,'') note
+            FROM students s LEFT JOIN classes c ON c.id=s.class_id
+            LEFT JOIN attendance a ON a.student_id=s.id AND a.attendance_date=?
+            WHERE s.class_id=? AND s.status='فعّال' ORDER BY s.full_name""", (self.date_var.get().strip(), class_id))
+        rows = [[r['student_no'], r['full_name'], f"{r['grade']} / {r['section']}", r['status'], r['note']] for r in records]
+        open_print_preview(f"كشف الحضور والغياب — {self.date_var.get().strip()}",
+            ["رقم الطالب", "اسم الطالب", "الصف / الشعبة", "الحالة", "ملاحظة"], rows,
+            self.app.school_settings().get("name", "مدرستي"), self.app.font_family, parent=self.frame)
 
     def refresh_classes(self):
         rows = self.db.query("SELECT id,grade,section,academic_year FROM classes ORDER BY grade,section")
@@ -1010,14 +1139,28 @@ class DocumentsTab:
         self.owner_combo = fields[1][1]
         self.owner_type.trace_add("write", lambda *_: self.refresh_owners())
         self.file_widget = fields[5][1]
-        ttk.Button(form, text="اختيار ملف…", command=self.browse_file).grid(row=2, column=4, padx=6, pady=4, sticky="ew")
+        ttk.Button(form, text="اختيار ملف…", command=self.browse_file).grid(row=2, column=4, padx=4, pady=4, sticky="ew")
+        ttk.Button(form, text="🖼️ إضافة صورة", command=self.browse_image).grid(row=2, column=5, padx=4, pady=4, sticky="ew")
+        form.columnconfigure(5, weight=0)
         buttons = ttk.Frame(form)
-        buttons.grid(row=4, column=0, columnspan=5, sticky="ew", pady=(8, 0))
-        ttk.Button(buttons, text="حفظ الوثيقة", command=self.save).pack(side="right", padx=3)
+        buttons.grid(row=4, column=0, columnspan=6, sticky="ew", pady=(8, 0))
+        ttk.Button(buttons, text="حفظ الوثيقة", command=self.save, style="Primary.TButton").pack(side="right", padx=3)
         ttk.Button(buttons, text="مسح الحقول", command=self.clear).pack(side="right", padx=3)
         ttk.Button(buttons, text="فتح الملف المحدد", command=self.open_selected).pack(side="left", padx=3)
+        ttk.Button(buttons, text="معاينة صورة", command=self.preview_image).pack(side="left", padx=3)
+        ttk.Button(buttons, text="🖨️ طباعة الأرشيف", command=self.print_archive).pack(side="left", padx=3)
         ttk.Button(buttons, text="حذف الوثيقة", command=self.delete_selected).pack(side="left", padx=3)
         ttk.Button(buttons, text="تصدير CSV", command=self.export_csv).pack(side="left", padx=3)
+
+        archive_tools = ttk.Frame(self.frame)
+        archive_tools.pack(fill="x", pady=(0, 6))
+        ttk.Label(archive_tools, text="🔎 البحث في الأرشيف:").pack(side="right", padx=(5, 3))
+        self.search_var = tk.StringVar()
+        archive_search = ttk.Entry(archive_tools, textvariable=self.search_var, width=34)
+        archive_search.pack(side="right", padx=4)
+        archive_search.bind("<KeyRelease>", lambda _event: self.refresh())
+        ttk.Button(archive_tools, text="مسح البحث", command=lambda: self.search_var.set("") or self.refresh()).pack(side="right", padx=3)
+        ttk.Button(archive_tools, text="تحديث الأرشيف", command=self.refresh).pack(side="right", padx=3)
 
         grid = ttk.Frame(self.frame)
         grid.pack(fill="both", expand=True)
@@ -1037,6 +1180,7 @@ class DocumentsTab:
         grid.rowconfigure(0, weight=1)
         grid.columnconfigure(0, weight=1)
         self.tree.bind("<<TreeviewSelect>>", self.select_row)
+        self.tree.bind("<MouseWheel>", lambda event: self.tree.yview_scroll(-1 * int(event.delta / 120), "units"))
         self.empty_hint = ttk.Label(
             grid,
             text="الأرشيف فارغ حالياً. اختر ملفاً، واكتب عنوان الوثيقة، ثم اضغط حفظ الوثيقة.",
@@ -1065,6 +1209,63 @@ class DocumentsTab:
         path = filedialog.askopenfilename(parent=self.frame, title="اختيار ملف الوثيقة", filetypes=[("كل الملفات", "*.*"), ("PDF", "*.pdf"), ("صور", "*.png *.jpg *.jpeg"), ("Word", "*.doc *.docx")])
         if path:
             self.file_var.set(path)
+
+    def browse_image(self):
+        path = filedialog.askopenfilename(parent=self.frame, title="إضافة صورة إلى الأرشيف",
+            filetypes=[("صور", "*.png *.jpg *.jpeg *.bmp *.gif *.webp"), ("كل الملفات", "*.*")])
+        if not path:
+            return
+        self.file_var.set(path)
+        if not self.title_var.get().strip():
+            self.title_var.set(Path(path).stem)
+        image_category = "صورة مدرسية / أرشيفية"
+        self.category_var.set(display_arabic_text(image_category))
+
+    def preview_image(self):
+        raw = self.file_var.get().strip()
+        path = Path(raw) if raw else None
+        if path and not path.is_absolute():
+            path = resolve_document_path(raw)
+        if not path or not path.exists() or not path.is_file():
+            sel = self.tree.selection()
+            if sel:
+                row = self.db.one("SELECT file_path FROM documents WHERE id=?", (safe_int(sel[0]),))
+                path = resolve_document_path(row["file_path"]) if row and row["file_path"] else None
+        if not path or not path.exists():
+            messagebox.showinfo("معاينة الصورة", "اختر صورة من زر «إضافة صورة» أو حدد وثيقة تحتوي على صورة.", parent=self.frame)
+            return
+        if not PIL_AVAILABLE:
+            messagebox.showwarning("مكتبة الصور غير متوفرة", "معاينة الصور تحتاج مكتبة Pillow. يمكنك استخدام «فتح الملف المحدد» لعرض الصورة في برنامج Windows.", parent=self.frame)
+            return
+        try:
+            with Image.open(path) as source:
+                img = source.convert("RGB")
+                img.thumbnail((1000, 700))
+                rendered = ImageTk.PhotoImage(img.copy())
+            window = tk.Toplevel(self.frame)
+            window.title(f"معاينة صورة — {path.name}")
+            window.geometry("1050x790")
+            window.configure(bg="#eaf0f5")
+            ttk.Label(window, text=path.name, style="PageTitle.TLabel", anchor="center").pack(fill="x", padx=10, pady=8)
+            panel = ttk.Frame(window, padding=8)
+            panel.pack(fill="both", expand=True)
+            label = ttk.Label(panel, image=rendered, anchor="center")
+            label.image = rendered
+            label.pack(fill="both", expand=True)
+            ttk.Button(window, text="إغلاق المعاينة", command=window.destroy).pack(pady=8)
+        except Exception as exc:
+            messagebox.showerror("تعذّرت معاينة الصورة", f"لم يمكن فتح الصورة. يمكنك فتح الملف مباشرةً.\n{exc}", parent=self.frame)
+
+    def print_archive(self):
+        rows = self.db.query("""SELECT d.title,
+            CASE d.owner_type WHEN 'school' THEN 'المدرسة' WHEN 'student' THEN 'طالب' WHEN 'teacher' THEN 'مدرس' ELSE d.owner_type END owner_type,
+            CASE d.owner_type WHEN 'school' THEN COALESCE((SELECT name FROM school_info WHERE id=1),'المدرسة')
+              WHEN 'student' THEN COALESCE((SELECT full_name FROM students WHERE id=d.owner_id),'طالب محذوف')
+              WHEN 'teacher' THEN COALESCE((SELECT full_name FROM teachers WHERE id=d.owner_id),'مدرس محذوف') ELSE '' END owner_name,
+            d.category,d.document_date,COALESCE(d.notes,'') notes FROM documents d ORDER BY d.id DESC""")
+        data = [[r["title"], r["owner_type"], r["owner_name"], r["category"], r["document_date"], r["notes"]] for r in rows]
+        open_print_preview("أرشيف وثائق المدرسة", ["العنوان", "الجهة", "الاسم", "التصنيف", "التاريخ", "ملاحظات"], data,
+            self.app.school_settings().get("name", "مدرستي"), self.app.font_family, parent=self.frame)
 
     def _owner_db(self):
         t = self.owner_type_display_to_raw.get(self.owner_type.get(), self.owner_type.get())
@@ -1133,11 +1334,18 @@ class DocumentsTab:
             return
         for item in self.tree.get_children():
             self.tree.delete(item)
-        rows = self.db.query("""SELECT d.id,d.title,d.owner_type,d.owner_id,d.category,d.document_date,d.file_path,d.notes,
+        sql = """SELECT d.id,d.title,d.owner_type,d.owner_id,d.category,d.document_date,d.file_path,d.notes,
             CASE d.owner_type WHEN 'school' THEN COALESCE((SELECT name FROM school_info WHERE id=1),'المدرسة')
               WHEN 'student' THEN COALESCE((SELECT full_name FROM students WHERE id=d.owner_id),'طالب محذوف')
               WHEN 'teacher' THEN COALESCE((SELECT full_name FROM teachers WHERE id=d.owner_id),'مدرس محذوف') ELSE '' END AS owner_name
-            FROM documents d ORDER BY d.id DESC""")
+            FROM documents d"""
+        term = self.search_var.get().strip() if hasattr(self, "search_var") else ""
+        params = []
+        if term:
+            sql += " WHERE d.title LIKE ? OR d.category LIKE ? OR COALESCE(d.notes,'') LIKE ? OR COALESCE(d.file_path,'') LIKE ?"
+            params = [f"%{term}%"] * 4
+        sql += " ORDER BY d.id DESC"
+        rows = self.db.query(sql, params)
         for r in rows:
             owner_label = {"school": "المدرسة", "student": "طالب", "teacher": "مدرس"}.get(r["owner_type"], r["owner_type"])
             fname = Path(r["file_path"]).name if r["file_path"] else ""
@@ -1145,6 +1353,8 @@ class DocumentsTab:
         if rows:
             self.empty_hint.place_forget()
         else:
+            text = "لا توجد نتائج مطابقة للبحث. جرّب كلمة أخرى." if term else "الأرشيف فارغ حالياً. أضف وثيقة أو صورة ثم احفظها لتظهر هنا."
+            self.empty_hint.configure(text=text)
             self.empty_hint.place(relx=0.5, rely=0.5, anchor="center")
 
     def select_row(self, _event=None):
@@ -1225,6 +1435,132 @@ class DocumentsTab:
             for r in rows:
                 w.writerow([r["title"], r["owner_type"], r["owner_name"], r["category"], r["document_date"], r["file_path"], r["notes"]])
         messagebox.showinfo("اكتمل التصدير", "تم تصدير أرشيف الوثائق.", parent=self.frame)
+
+
+class AppearanceSettingsDialog:
+    """User preferences for readable Arabic text, palette, and field appearance."""
+    COLOR_KEYS = [
+        ("text_color", "لون النص"),
+        ("accent_color", "اللون الأساسي للأزرار والعناصر"),
+        ("field_color", "خلفية خانات الإدخال"),
+        ("panel_color", "خلفية البطاقات والجداول"),
+    ]
+
+    def __init__(self, app):
+        self.app = app
+        self.win = tk.Toplevel(app.root)
+        self.win.title("إعدادات مظهر مدرستي Pro")
+        self.win.transient(app.root)
+        self.win.grab_set()
+        self.win.geometry("700x610")
+        self.win.minsize(650, 560)
+        self.vars = {}
+        self.swatches = {}
+        prefs = app.appearance_preferences
+        families = self._font_families()
+        current_family = prefs.get("font_family", "Tahoma")
+        if current_family not in families:
+            families.insert(0, current_family)
+        body = ttk.Frame(self.win, padding=18)
+        body.pack(fill="both", expand=True)
+        ttk.Label(body, text="⚙️ إعدادات الواجهة والخط والألوان", style="PageTitle.TLabel", anchor="e").pack(fill="x", pady=(0, 6))
+        ttk.Label(body, text="اختر خطاً واضحاً للعربية وحجم النص وألوان الواجهة. تحفظ الاختيارات على هذا الجهاز.", style="Hint.TLabel", anchor="e", wraplength=620).pack(fill="x", pady=(0, 12))
+        font_box = ttk.LabelFrame(body, text="🅰️ الخط وحجم الكتابة", padding=12)
+        font_box.pack(fill="x", pady=(0, 10))
+        ttk.Label(font_box, text="نوع الخط:").grid(row=0, column=3, sticky="e", padx=6, pady=7)
+        self.vars["font_family"] = tk.StringVar(value=current_family)
+        ttk.Combobox(font_box, textvariable=self.vars["font_family"], values=families, state="readonly", width=34).grid(row=0, column=2, columnspan=1, sticky="ew", padx=6, pady=7)
+        ttk.Label(font_box, text="حجم الخط:").grid(row=0, column=1, sticky="e", padx=6, pady=7)
+        self.vars["font_size"] = tk.StringVar(value=str(prefs.get("font_size", 11)))
+        ttk.Combobox(font_box, textvariable=self.vars["font_size"], values=[str(x) for x in range(9, 19)], state="readonly", width=8).grid(row=0, column=0, sticky="w", padx=6, pady=7)
+        font_box.columnconfigure(2, weight=1)
+        colors_box = ttk.LabelFrame(body, text="🎨 ألوان البرنامج", padding=12)
+        colors_box.pack(fill="both", expand=True, pady=(0, 12))
+        for row, (key, label) in enumerate(self.COLOR_KEYS):
+            ttk.Label(colors_box, text=label, anchor="e").grid(row=row, column=2, sticky="ew", padx=8, pady=8)
+            default_color = app.colors.get({"text_color":"text", "accent_color":"accent", "field_color":"field", "panel_color":"panel"}[key], "#ffffff")
+            stored_color = prefs.get(key, "") or ""
+            color = stored_color or default_color
+            self.vars[key] = tk.StringVar(value=stored_color)
+            swatch = tk.Label(colors_box, text=color, bg=color, fg=self._contrast(color), relief="solid", bd=1, padx=9, pady=5, width=12)
+            swatch.grid(row=row, column=1, sticky="ew", padx=6, pady=6)
+            self.swatches[key] = swatch
+            ttk.Button(colors_box, text="اختيار اللون…", command=lambda k=key: self.choose_color(k)).grid(row=row, column=0, padx=6, pady=6)
+        colors_box.columnconfigure(2, weight=1)
+        footer = ttk.Frame(body)
+        footer.pack(fill="x")
+        ttk.Button(footer, text="إعادة الافتراضي", command=self.reset_defaults).pack(side="left", padx=3)
+        ttk.Button(footer, text="إلغاء", command=self.win.destroy).pack(side="left", padx=3)
+        ttk.Button(footer, text="حفظ وتطبيق الإعدادات", command=self.save, style="Primary.TButton").pack(side="right", padx=3)
+
+    @staticmethod
+    def _contrast(hex_color):
+        try:
+            value = hex_color.lstrip("#")
+            r, g, b = [int(value[i:i+2], 16) for i in (0, 2, 4)]
+            return "#111827" if (0.299*r + 0.587*g + 0.114*b) > 150 else "#FFFFFF"
+        except Exception:
+            return "#111827"
+
+    def _font_families(self):
+        try:
+            found = set(tkfont.families(self.app.root))
+        except Exception:
+            found = set()
+        preferred = ["Tahoma", "Segoe UI", "Arial", "Calibri", "Noto Naskh Arabic UI", "Traditional Arabic"]
+        result = [f for f in preferred if f in found]
+        result.extend(sorted(f for f in found if f not in result and ("Arabic" in f or f in ("Verdana", "Microsoft Sans Serif")))[:20])
+        return result or preferred[:4]
+
+    def choose_color(self, key):
+        palette_key = {"text_color":"text", "accent_color":"accent", "field_color":"field", "panel_color":"panel"}[key]
+        current = self.vars[key].get() or self.app.colors.get(palette_key, "#ffffff")
+        picked = colorchooser.askcolor(color=current, title="اختيار اللون", parent=self.win)[1]
+        if picked:
+            self.vars[key].set(picked.upper())
+            self.swatches[key].configure(text=picked.upper(), bg=picked.upper(), fg=self._contrast(picked))
+
+    def reset_defaults(self):
+        self.vars["font_family"].set("Tahoma")
+        self.vars["font_size"].set("11")
+        # Empty color values mean use the coordinated defaults for the current theme.
+        dark = self.app.theme_mode == "dark"
+        defaults = ({"text":"#EFF5FB", "accent":"#24B6A6", "field":"#0F1D30", "panel":"#14253A"}
+                    if dark else {"text":"#19324B", "accent":"#159E98", "field":"#FBFDFF", "panel":"#FFFFFF"})
+        palette_map = {"text_color":"text", "accent_color":"accent", "field_color":"field", "panel_color":"panel"}
+        for key, _label in self.COLOR_KEYS:
+            self.vars[key].set("")
+            color = defaults[palette_map[key]]
+            self.swatches[key].configure(text=color, bg=color, fg=self._contrast(color))
+
+    def save(self):
+        family = self.vars["font_family"].get().strip() or "Tahoma"
+        try:
+            size = int(self.vars["font_size"].get())
+        except (TypeError, ValueError):
+            messagebox.showwarning("حجم الخط", "اختر حجم خط من القائمة.", parent=self.win)
+            return
+        if not 9 <= size <= 18:
+            messagebox.showwarning("حجم الخط", "حجم الخط يجب أن يكون بين 9 و18.", parent=self.win)
+            return
+        prefs = dict(self.app.appearance_preferences)
+        prefs["font_family"], prefs["font_size"] = family, size
+        for key, _label in self.COLOR_KEYS:
+            value = self.vars[key].get().strip()
+            if value and not re.fullmatch(r"#[0-9A-Fa-f]{6}", value):
+                messagebox.showwarning("لون غير صحيح", "اختر اللون من أداة اختيار الألوان.", parent=self.win)
+                return
+            # Store empty values for the theme defaults, otherwise a valid hex color.
+            prefs[key] = value.upper() if value else ""
+        self.app.appearance_preferences = prefs
+        self.app.font_family = family
+        self.app.font_size = size
+        self.app._save_ui_preferences()
+        self.app._style()
+        self.app._update_tree_row_colors()
+        self.app.status_var.set("تم حفظ إعدادات الخط والألوان")
+        self.win.destroy()
+        messagebox.showinfo("تم تطبيق الإعدادات", "تم تطبيق الخط والألوان وحفظها. ستبقى محفوظة عند فتح البرنامج مرة أخرى.", parent=self.app.root)
 
 
 class SettingsTab:
@@ -1470,7 +1806,8 @@ class ReportsTab:
         ttk.Label(bar, text="الصف (لجدول الحصص):").pack(side="right", padx=5)
         self.class_combo = ttk.Combobox(bar, textvariable=self.class_var, state="readonly", width=26)
         self.class_combo.pack(side="right", padx=5)
-        ttk.Button(bar, text="إنشاء التقرير", command=self.generate).pack(side="right", padx=5)
+        ttk.Button(bar, text="إنشاء التقرير", command=self.generate, style="Primary.TButton").pack(side="right", padx=5)
+        ttk.Button(bar, text="🖨️ طباعة التقرير", command=self.print_report).pack(side="left", padx=5)
         ttk.Button(bar, text="تصدير التقرير CSV", command=self.export_csv).pack(side="left", padx=5)
         grid = ttk.Frame(self.frame)
         grid.pack(fill="both", expand=True)
@@ -1483,6 +1820,7 @@ class ReportsTab:
         x.grid(row=1, column=0, sticky="ew")
         grid.rowconfigure(0, weight=1)
         grid.columnconfigure(0, weight=1)
+        self.tree.bind("<MouseWheel>", lambda event: self.tree.yview_scroll(-1 * int(event.delta / 120), "units"))
 
     def refresh_classes(self):
         rows = self.db.query("SELECT id,grade,section,academic_year FROM classes ORDER BY grade,section")
@@ -1556,6 +1894,14 @@ class ReportsTab:
             self._show(["رقم الطالب", "اسم الطالب", "السنة", "نوع الرسم", "المبلغ الكلي", "المدفوع", "المتبقي", "الاستحقاق", "تاريخ الدفع", "ملاحظات"],
                 [(r[k] for k in ["student_no","full_name","academic_year","fee_type","amount","paid_amount","remaining","due_date","payment_date","notes"]) for r in rows])
 
+    def print_report(self):
+        if not self.headers_export:
+            messagebox.showinfo("لا يوجد تقرير", "أنشئ التقرير أولاً ثم اطبع النتيجة.", parent=self.frame)
+            return
+        kind = self.report_display_to_raw.get(self.kind_var.get(), self.kind_var.get())
+        open_print_preview(kind, self.headers_export, self.rows_export,
+            self.app.school_settings().get("name", "مدرستي"), self.app.font_family, parent=self.frame)
+
     def export_csv(self):
         if not self.headers_export:
             messagebox.showinfo("لا يوجد تقرير", "أنشئ التقرير أولاً.", parent=self.frame)
@@ -1584,9 +1930,9 @@ class AuthenticationDialog:
         self.win.protocol("WM_DELETE_WINDOW", self.cancel)
         box = ttk.Frame(self.win, padding=24)
         box.pack(fill="both", expand=True)
-        ttk.Label(box, text="مدرستي Pro", font=("Segoe UI", 21, "bold"), foreground="#12365a").pack(pady=(0, 4))
+        ttk.Label(box, text="مدرستي Pro", font=("Tahoma", 21, "bold"), foreground="#12365a").pack(pady=(0, 4))
         headline = "إنشاء حساب المدير لأول تشغيل" if self.first_run else "سجّل الدخول إلى نظام المدرسة"
-        ttk.Label(box, text=headline, font=("Segoe UI", 11, "bold")).pack(pady=(0, 5))
+        ttk.Label(box, text=headline, font=("Tahoma", 11, "bold")).pack(pady=(0, 5))
         hint = "أنشئ حساب المدير وكلمة مرور لا تقل عن 10 أحرف." if self.first_run else "أدخل اسم المستخدم وكلمة المرور للمتابعة."
         ttk.Label(box, text=hint, style="Hint.TLabel", wraplength=360, justify="center").pack(pady=(0, 16))
         form = ttk.Frame(box)
@@ -1788,7 +2134,10 @@ class SchoolApp:
         self.current_user = current_user
         self.db = SchoolDB()
         self.managers = {}
-        self.theme_mode = self._load_theme_mode()
+        self.appearance_preferences = self._load_ui_preferences()
+        self.theme_mode = self.appearance_preferences.get("theme_mode", "light")
+        self.font_family = self.appearance_preferences.get("font_family", "Tahoma")
+        self.font_size = int(self.appearance_preferences.get("font_size", 11) or 11)
         self._update_check_running = False
         self._update_download_running = False
         self.root.geometry("1440x900")
@@ -1823,9 +2172,18 @@ class SchoolApp:
         ttk.Label(brand, text="نظام إدارة المدارس العراقية المتكامل", style="HeaderSubtitle.TLabel").pack(anchor="e")
         utilities = ttk.Frame(self.header, style="Header.TFrame")
         utilities.pack(side="left", anchor="w")
-        ttk.Label(utilities, text=f"الإصدار {APP_VERSION}  •  المستخدم: {self.current_user['full_name']}", style="HeaderSubtitle.TLabel").pack(side="top", anchor="w", pady=(0, 5))
-        buttons = ttk.Frame(utilities, style="Header.TFrame")
-        buttons.pack(side="left", anchor="w")
+        ttk.Label(
+            utilities,
+            text=f"الإصدار {APP_VERSION}  •  المستخدم: {self.current_user['full_name']}",
+            style="HeaderSubtitle.TLabel", anchor="w", justify="left"
+        ).pack(side="top", anchor="w", pady=(0, 5))
+        # Place actions on a separate full-width toolbar so all commands remain
+        # visible on ordinary laptop screens instead of disappearing under the logo.
+        self.action_toolbar = ttk.Frame(root, style="Header.TFrame", padding=(12, 4))
+        self.action_toolbar.pack(fill="x")
+        buttons = ttk.Frame(self.action_toolbar, style="Header.TFrame")
+        buttons.pack(side="right", anchor="e")
+        ttk.Button(buttons, text="🎨 إعدادات الواجهة", command=self.open_appearance_settings, style="Top.TButton").pack(side="left", padx=2)
         self.theme_button = ttk.Button(buttons, text=("☀️ الوضع الفاتح" if self.theme_mode == "dark" else "🌙 الوضع الداكن"), command=self.toggle_theme, style="Top.TButton")
         self.theme_button.pack(side="left", padx=2)
         self.update_button = ttk.Button(buttons, text="🔄 تحديث البرنامج", command=self.check_for_updates, style="Update.TButton")
@@ -1885,6 +2243,11 @@ class SchoolApp:
         except tk.TclError:
             pass
         dark = getattr(self, "theme_mode", "light") == "dark"
+        font_family = getattr(self, "font_family", "Tahoma") or "Tahoma"
+        font_size = max(9, min(18, int(getattr(self, "font_size", 11) or 11)))
+        def font_style(base=11, bold=False):
+            size = max(8, min(36, font_size + (base - 11)))
+            return (font_family, size, "bold" if bold else "normal")
         if dark:
             self.colors = {
                 "bg": "#0C1626", "panel": "#14253A", "field": "#0F1D30",
@@ -1903,70 +2266,90 @@ class SchoolApp:
                 "stripe": "#F4F8FC", "header": "#123653", "sidebar": "#123653",
                 "gold": "#F2BD4D", "danger": "#C94F5D", "success": "#16855B",
             }
+        # Apply user-selected appearance colors without changing the theme's structural contrast.
+        for preference_key, palette_key in (("text_color", "text"), ("accent_color", "accent"),
+                                            ("field_color", "field"), ("panel_color", "panel")):
+            custom = getattr(self, "appearance_preferences", {}).get(preference_key, "")
+            if isinstance(custom, str) and re.fullmatch(r"#[0-9A-Fa-f]{6}", custom):
+                self.colors[palette_key] = custom.upper()
         c = self.colors
         self.root.configure(bg=c["bg"])
-        style.configure(".", font=("Segoe UI", 11))
+        if hasattr(self, "dashboard_canvas"):
+            try:
+                self.dashboard_canvas.configure(background=c["bg"])
+            except tk.TclError:
+                pass
+        if hasattr(self, "nav_canvas"):
+            try:
+                self.nav_canvas.configure(background=c["sidebar"])
+            except tk.TclError:
+                pass
+        style.configure(".", font=font_style(11))
         style.configure("TFrame", background=c["bg"])
         style.configure("Header.TFrame", background=c["header"])
         style.configure("Hero.TFrame", background=c["panel"], bordercolor=c["border"], relief="solid")
         style.configure("Step.TFrame", background=c["panel"], bordercolor=c["border"], relief="solid")
         style.configure("TLabelframe", background=c["panel"], bordercolor=c["border"], relief="solid", padding=7)
-        style.configure("TLabelframe.Label", background=c["panel"], foreground=c["accent_dark"], font=("Segoe UI", 11, "bold"))
+        style.configure("TLabelframe.Label", background=c["panel"], foreground=c["accent_dark"], font=font_style(11, bold=True))
         style.configure("Card.TLabelframe", background=c["panel"], bordercolor=c["border"], relief="solid", padding=12)
-        style.configure("Card.TLabelframe.Label", background=c["panel"], foreground=c["accent_dark"], font=("Segoe UI", 11, "bold"))
-        style.configure("TLabel", background=c["bg"], foreground=c["text"], font=("Segoe UI", 11))
+        style.configure("Card.TLabelframe.Label", background=c["panel"], foreground=c["accent_dark"], font=font_style(11, bold=True))
+        style.configure("TLabel", background=c["bg"], foreground=c["text"], font=font_style(11))
         style.configure("Panel.TLabel", background=c["panel"], foreground=c["text"])
-        style.configure("Metric.TLabel", font=("Segoe UI", 25, "bold"), foreground=c["accent"], background=c["panel"])
-        style.configure("MetricBlue.TLabel", font=("Segoe UI", 25, "bold"), foreground=("#76B7FF" if dark else "#2767AE"), background=c["panel"])
-        style.configure("MetricTeal.TLabel", font=("Segoe UI", 25, "bold"), foreground=c["accent"], background=c["panel"])
-        style.configure("MetricGold.TLabel", font=("Segoe UI", 25, "bold"), foreground=("#F4C45E" if dark else "#B77918"), background=c["panel"])
-        style.configure("MetricPurple.TLabel", font=("Segoe UI", 25, "bold"), foreground=("#C6A0FF" if dark else "#8051B7"), background=c["panel"])
-        style.configure("PageTitle.TLabel", font=("Segoe UI", 17, "bold"), foreground=("#F2C766" if dark else c["accent_dark"]), background=c["bg"])
-        style.configure("DashboardIntro.TLabel", font=("Segoe UI", 24, "bold"), foreground=("#F2C766" if dark else c["accent_dark"]), background=c["bg"])
-        style.configure("Title.TLabel", font=("Segoe UI", 26, "bold"), foreground="#FFFFFF", background=c["header"])
-        style.configure("HeaderTitle.TLabel", font=("Segoe UI", 25, "bold"), foreground="#FFFFFF", background=c["header"])
-        style.configure("HeaderSubtitle.TLabel", font=("Segoe UI", 10, "bold"), foreground="#D0E2F0", background=c["header"])
-        style.configure("Subtitle.TLabel", font=("Segoe UI", 11, "bold"), foreground=c["muted"], background=c["bg"])
-        style.configure("Hint.TLabel", font=("Segoe UI", 10), foreground=c["muted"], background=c["bg"])
-        style.configure("StepTitle.TLabel", font=("Segoe UI", 11, "bold"), foreground=c["accent_dark"], background=c["panel"])
-        style.configure("StepHint.TLabel", font=("Segoe UI", 9), foreground=c["muted"], background=c["panel"])
-        style.configure("Status.TLabel", font=("Segoe UI", 10, "bold"), foreground="#F3F8FF", background=c["accent_dark"])
-        style.configure("TButton", font=("Segoe UI", 10, "bold"), padding=(10, 8), background=c["button"], foreground=c["text"], bordercolor=c["border"])
+        style.configure("Metric.TLabel", font=font_style(25, bold=True), foreground=c["accent"], background=c["panel"])
+        style.configure("MetricBlue.TLabel", font=font_style(25, bold=True), foreground=("#76B7FF" if dark else "#2767AE"), background=c["panel"])
+        style.configure("MetricTeal.TLabel", font=font_style(25, bold=True), foreground=c["accent"], background=c["panel"])
+        style.configure("MetricGold.TLabel", font=font_style(25, bold=True), foreground=("#F4C45E" if dark else "#B77918"), background=c["panel"])
+        style.configure("MetricPurple.TLabel", font=font_style(25, bold=True), foreground=("#C6A0FF" if dark else "#8051B7"), background=c["panel"])
+        style.configure("PageTitle.TLabel", font=font_style(17, bold=True), foreground=("#F2C766" if dark else c["accent_dark"]), background=c["bg"])
+        style.configure("DashboardIntro.TLabel", font=font_style(24, bold=True), foreground=("#F2C766" if dark else c["accent_dark"]), background=c["bg"])
+        style.configure("Title.TLabel", font=font_style(26, bold=True), foreground="#FFFFFF", background=c["header"])
+        style.configure("HeaderTitle.TLabel", font=font_style(25, bold=True), foreground="#FFFFFF", background=c["header"])
+        style.configure("HeaderSubtitle.TLabel", font=font_style(10, bold=True), foreground="#D0E2F0", background=c["header"])
+        style.configure("Subtitle.TLabel", font=font_style(11, bold=True), foreground=c["muted"], background=c["bg"])
+        style.configure("Hint.TLabel", font=font_style(10), foreground=c["muted"], background=c["bg"])
+        style.configure("StepTitle.TLabel", font=font_style(11, bold=True), foreground=c["accent_dark"], background=c["panel"])
+        style.configure("StepHint.TLabel", font=font_style(9), foreground=c["muted"], background=c["panel"])
+        style.configure("Status.TLabel", font=font_style(10, bold=True), foreground="#F3F8FF", background=c["accent_dark"])
+        style.configure("TButton", font=font_style(10, bold=True), padding=(10, 8), background=c["button"], foreground=c["text"], bordercolor=c["border"])
         style.map("TButton", background=[("active", c["selected"]), ("pressed", c["selected"])], foreground=[("disabled", c["muted"])])
-        style.configure("Primary.TButton", font=("Segoe UI", 10, "bold"), padding=(12, 9), background=c["accent"], foreground="#FFFFFF", bordercolor=c["accent"])
+        style.configure("Primary.TButton", font=font_style(10, bold=True), padding=(12, 9), background=c["accent"], foreground="#FFFFFF", bordercolor=c["accent"])
         style.map("Primary.TButton", background=[("active", c["accent_dark"]), ("pressed", c["accent_dark"])], foreground=[("active", "#FFFFFF"), ("pressed", "#FFFFFF")])
-        style.configure("Success.TButton", font=("Segoe UI", 10, "bold"), padding=(10, 8), background=c["success"], foreground="#FFFFFF", bordercolor=c["success"])
+        style.configure("Success.TButton", font=font_style(10, bold=True), padding=(10, 8), background=c["success"], foreground="#FFFFFF", bordercolor=c["success"])
         style.map("Success.TButton", background=[("active", c["accent_dark"]), ("pressed", c["accent_dark"])], foreground=[("active", "#FFFFFF"), ("pressed", "#FFFFFF")])
-        style.configure("Danger.TButton", font=("Segoe UI", 10, "bold"), padding=(10, 8), background=c["danger"], foreground="#FFFFFF", bordercolor=c["danger"])
+        style.configure("Danger.TButton", font=font_style(10, bold=True), padding=(10, 8), background=c["danger"], foreground="#FFFFFF", bordercolor=c["danger"])
         style.map("Danger.TButton", background=[("active", "#993B4A"), ("pressed", "#993B4A")], foreground=[("active", "#FFFFFF"), ("pressed", "#FFFFFF")])
-        style.configure("Top.TButton", font=("Segoe UI", 9, "bold"), padding=(7, 6), background="#1D4D6D", foreground="#FFFFFF", bordercolor="#2B5B7C")
+        style.configure("Top.TButton", font=font_style(9, bold=True), padding=(7, 6), background="#1D4D6D", foreground="#FFFFFF", bordercolor="#2B5B7C")
         style.map("Top.TButton", background=[("active", "#286181"), ("pressed", "#286181")], foreground=[("active", "#FFFFFF"), ("pressed", "#FFFFFF")])
-        style.configure("Update.TButton", font=("Segoe UI", 9, "bold"), padding=(8, 6), background=c["gold"], foreground="#15324A", bordercolor=c["gold"])
+        style.configure("Update.TButton", font=font_style(9, bold=True), padding=(8, 6), background=c["gold"], foreground="#15324A", bordercolor=c["gold"])
         style.map("Update.TButton", background=[("active", "#FFD879"), ("pressed", "#E4AB35")], foreground=[("active", "#15324A"), ("pressed", "#15324A")])
-        style.configure("Step.TButton", font=("Segoe UI", 11, "bold"), padding=(8, 10), background=c["button"], foreground=c["text"], bordercolor=c["border"])
+        style.configure("Step.TButton", font=font_style(11, bold=True), padding=(8, 10), background=c["button"], foreground=c["text"], bordercolor=c["border"])
         style.map("Step.TButton", background=[("active", c["selected"]), ("pressed", c["selected"])])
-        style.configure("TEntry", font=("Segoe UI", 11), padding=8, fieldbackground=c["field"], foreground=c["text"])
-        style.configure("TCombobox", font=("Segoe UI", 11), padding=7, fieldbackground=c["field"], foreground=c["text"], arrowcolor=c["accent"])
+        style.configure("TEntry", font=font_style(11), padding=8, fieldbackground=c["field"], foreground=c["text"])
+        style.configure("TCombobox", font=font_style(11), padding=7, fieldbackground=c["field"], foreground=c["text"], arrowcolor=c["accent"])
         style.map("TCombobox", fieldbackground=[("readonly", c["field"])], foreground=[("readonly", c["text"])])
-        style.configure("Treeview", font=("Segoe UI", 11), rowheight=36, background=c["panel"], fieldbackground=c["panel"], foreground=c["text"])
-        style.configure("Treeview.Heading", font=("Segoe UI", 11, "bold"), background=c["heading"], foreground=c["accent_dark"], padding=(10, 10))
+        style.configure("Treeview", font=font_style(11), rowheight=max(30, 36 + (font_size - 11) * 3), background=c["panel"], fieldbackground=c["panel"], foreground=c["text"])
+        style.configure("Treeview.Heading", font=font_style(11, bold=True), background=c["heading"], foreground=c["accent_dark"], padding=(10, 10))
         style.map("Treeview", background=[("selected", c["selected"])], foreground=[("selected", c["text"])])
         style.configure("TNotebook", background=c["bg"], tabmargins=(4, 5, 4, 0))
-        style.configure("TNotebook.Tab", font=("Segoe UI", 11, "bold"), padding=(14, 11), background=c["button"], foreground=c["text"])
+        style.configure("TNotebook.Tab", font=font_style(11, bold=True), padding=(14, 11), background=c["button"], foreground=c["text"])
         style.map("TNotebook.Tab", background=[("selected", c["panel"]), ("active", c["selected"])], foreground=[("selected", c["accent_dark"] if not dark else "#93c5fd")])
         try:
+            # The app has an intentional school-themed sidebar. Hide the duplicate
+            # tab strip as well; styling only Hidden.TNotebook leaves tabs visible.
             style.layout("Hidden.TNotebook", [("Notebook.client", {"sticky": "nswe"})])
+            # Tab elements use the child style, which must be hidden explicitly.
+            style.layout("Hidden.TNotebook.Tab", [])
         except tk.TclError:
             pass
         # The navigation stays a dark, high-contrast school-themed rail in both themes.
         style.configure("Sidebar.TFrame", background=c["sidebar"], bordercolor=c["sidebar"], relief="flat")
-        style.configure("SidebarTitle.TLabel", background=c["sidebar"], foreground="#FFFFFF", font=("Segoe UI", 14, "bold"))
-        style.configure("SidebarHint.TLabel", background=c["sidebar"], foreground="#C3D8E7", font=("Segoe UI", 9))
-        style.configure("Nav.TButton", anchor="e", font=("Segoe UI", 10, "bold"), padding=(9, 8), background=c["sidebar"], foreground="#E9F3FA", bordercolor=c["sidebar"])
+        style.configure("SidebarTitle.TLabel", background=c["sidebar"], foreground="#FFFFFF", font=font_style(14, bold=True))
+        style.configure("SidebarHint.TLabel", background=c["sidebar"], foreground="#C3D8E7", font=font_style(9))
+        style.configure("Nav.TButton", anchor="e", font=font_style(10, bold=True), padding=(9, 8), background=c["sidebar"], foreground="#E9F3FA", bordercolor=c["sidebar"])
         style.map("Nav.TButton", background=[("active", "#1B4A69"), ("pressed", "#1B4A69")], foreground=[("active", "#FFFFFF"), ("pressed", "#FFFFFF")])
-        style.configure("NavActive.TButton", anchor="e", font=("Segoe UI", 10, "bold"), padding=(9, 8), background=c["accent"], foreground="#FFFFFF", bordercolor=c["accent"])
+        style.configure("NavActive.TButton", anchor="e", font=font_style(10, bold=True), padding=(9, 8), background=c["accent"], foreground="#FFFFFF", bordercolor=c["accent"])
         style.map("NavActive.TButton", background=[("active", "#0B807A"), ("pressed", "#0B807A")], foreground=[("active", "#FFFFFF"), ("pressed", "#FFFFFF")])
-        style.configure("EmptyState.TLabel", font=("Segoe UI", 12, "bold"), foreground=c["muted"], background=c["panel"], padding=14)
+        style.configure("EmptyState.TLabel", font=font_style(12, bold=True), foreground=c["muted"], background=c["panel"], padding=14)
         self._update_tree_row_colors()
 
     def _update_tree_row_colors(self):
@@ -1990,6 +2373,58 @@ class SchoolApp:
         ttk.Label(self.nav_frame, text="القائمة الرئيسية", style="SidebarTitle.TLabel", anchor="e").pack(fill="x", pady=(5, 3))
         ttk.Label(self.nav_frame, text="اختر القسم الذي تريد العمل به", style="SidebarHint.TLabel", anchor="e").pack(fill="x", pady=(0, 10))
         ttk.Separator(self.nav_frame).pack(fill="x", pady=(0, 8))
+
+        # Keep all school sections accessible even when the user increases font size
+        # or runs the app on a short laptop screen.
+        list_area = ttk.Frame(self.nav_frame, style="Sidebar.TFrame")
+        list_area.pack(fill="both", expand=True)
+        self.nav_canvas = tk.Canvas(
+            list_area, background=self.colors["sidebar"], highlightthickness=0, borderwidth=0
+        )
+        self.nav_scrollbar = ttk.Scrollbar(list_area, orient="vertical", command=self.nav_canvas.yview)
+        self.nav_canvas.configure(yscrollcommand=self.nav_scrollbar.set)
+        self.nav_canvas.pack(side="right", fill="both", expand=True)
+        self.nav_scrollbar.pack(side="left", fill="y")
+        self.nav_list_frame = ttk.Frame(self.nav_canvas, style="Sidebar.TFrame")
+        self._nav_canvas_window = self.nav_canvas.create_window((0, 0), window=self.nav_list_frame, anchor="nw")
+        self.nav_list_frame.bind(
+            "<Configure>",
+            lambda _event: self.nav_canvas.configure(scrollregion=self.nav_canvas.bbox("all"))
+        )
+        self.nav_canvas.bind(
+            "<Configure>",
+            lambda event: self.nav_canvas.itemconfigure(self._nav_canvas_window, width=event.width)
+        )
+
+        def nav_wheel(event):
+            try:
+                under = self.root.winfo_containing(self.root.winfo_pointerx(), self.root.winfo_pointery())
+            except tk.TclError:
+                return None
+            inside = False
+            while under is not None:
+                if under == self.nav_list_frame or under == self.nav_canvas:
+                    inside = True
+                    break
+                under = getattr(under, "master", None)
+            if not inside:
+                return None
+            if getattr(event, "num", None) == 4:
+                step = -3
+            elif getattr(event, "num", None) == 5:
+                step = 3
+            else:
+                delta = getattr(event, "delta", 0)
+                step = -int(delta / 120) * 3 if delta else 0
+            if step:
+                self.nav_canvas.yview_scroll(step, "units")
+                return "break"
+            return None
+
+        self.root.bind_all("<MouseWheel>", nav_wheel, add="+")
+        self.root.bind_all("<Button-4>", nav_wheel, add="+")
+        self.root.bind_all("<Button-5>", nav_wheel, add="+")
+
         self.nav_buttons = []
         self.nav_labels = [
             ("🏠", "الرئيسية"), ("🏫", "الصفوف والشعب"), ("👩‍🏫", "المدرسون"),
@@ -1999,12 +2434,11 @@ class SchoolApp:
         ]
         for index, (icon, label) in enumerate(self.nav_labels):
             button = ttk.Button(
-                self.nav_frame, text=f"{icon}   {label}", style="Nav.TButton",
+                self.nav_list_frame, text=f"{icon}   {label}", style="Nav.TButton",
                 command=lambda page=index: self.show_page(page)
             )
             button.pack(fill="x", pady=2)
             self.nav_buttons.append(button)
-        ttk.Frame(self.nav_frame, style="Sidebar.TFrame").pack(fill="both", expand=True)
         ttk.Separator(self.nav_frame).pack(fill="x", pady=(8, 5))
         ttk.Label(self.nav_frame, text="✓ تُحفظ السجلات على هذا الجهاز", style="SidebarHint.TLabel", anchor="e", wraplength=205).pack(fill="x", pady=(0, 3))
         self.show_page(0)
@@ -2030,15 +2464,70 @@ class SchoolApp:
         self.status_var.set("تم تغيير مظهر البرنامج")
 
     def _build_dashboard(self):
-        intro = ttk.Label(self.dashboard_frame, text="🎓  مدرستي Pro", style="DashboardIntro.TLabel")
+        # The dashboard contains onboarding cards and quick actions. Make the page
+        # scrollable so these controls remain accessible on shorter laptop displays.
+        self.dashboard_canvas = tk.Canvas(
+            self.dashboard_frame, background=self.colors["bg"],
+            highlightthickness=0, borderwidth=0
+        )
+        self.dashboard_scrollbar = ttk.Scrollbar(
+            self.dashboard_frame, orient="vertical", command=self.dashboard_canvas.yview
+        )
+        self.dashboard_canvas.configure(yscrollcommand=self.dashboard_scrollbar.set)
+        self.dashboard_canvas.pack(side="left", fill="both", expand=True)
+        self.dashboard_scrollbar.pack(side="right", fill="y")
+        self.dashboard_inner = ttk.Frame(self.dashboard_canvas, padding=12)
+        self._dashboard_canvas_window = self.dashboard_canvas.create_window(
+            (0, 0), window=self.dashboard_inner, anchor="nw"
+        )
+        self.dashboard_inner.bind(
+            "<Configure>",
+            lambda _event: self.dashboard_canvas.configure(scrollregion=self.dashboard_canvas.bbox("all"))
+        )
+        self.dashboard_canvas.bind(
+            "<Configure>",
+            lambda event: self.dashboard_canvas.itemconfigure(self._dashboard_canvas_window, width=event.width)
+        )
+
+        def dashboard_wheel(event):
+            if not self.dashboard_canvas.winfo_ismapped():
+                return None
+            try:
+                under = self.root.winfo_containing(self.root.winfo_pointerx(), self.root.winfo_pointery())
+            except tk.TclError:
+                return None
+            inside = False
+            while under is not None:
+                if under == self.dashboard_inner or under == self.dashboard_canvas:
+                    inside = True
+                    break
+                under = getattr(under, "master", None)
+            if not inside:
+                return None
+            if getattr(event, "num", None) == 4:
+                step = -3
+            elif getattr(event, "num", None) == 5:
+                step = 3
+            else:
+                delta = getattr(event, "delta", 0)
+                step = -int(delta / 120) * 3 if delta else 0
+            if step:
+                self.dashboard_canvas.yview_scroll(step, "units")
+                return "break"
+            return None
+
+        self.root.bind_all("<MouseWheel>", dashboard_wheel, add="+")
+        self.root.bind_all("<Button-4>", dashboard_wheel, add="+")
+        self.root.bind_all("<Button-5>", dashboard_wheel, add="+")
+        intro = ttk.Label(self.dashboard_inner, text="🎓  مدرستي Pro", style="DashboardIntro.TLabel")
         intro.pack(anchor="e", pady=(2, 4))
         ttk.Label(
-            self.dashboard_frame,
+            self.dashboard_inner,
             text="نظام عراقي متكامل لتنظيم المدرسة: سجلات الطلبة والملاك والصفوف والحضور والدرجات والجداول.",
-            wraplength=1200, style="Subtitle.TLabel", anchor="e", justify="right"
+            wraplength=850, style="Subtitle.TLabel", anchor="e", justify="right"
         ).pack(anchor="e", pady=(0, 12))
 
-        self.cards_frame = ttk.Frame(self.dashboard_frame)
+        self.cards_frame = ttk.Frame(self.dashboard_inner)
         self.cards_frame.pack(fill="x", pady=(0, 14))
         self.metric_vars = {}
         metrics = [
@@ -2056,7 +2545,7 @@ class SchoolApp:
             ttk.Label(card, textvariable=var, style=metric_style, anchor="center").pack(fill="x", pady=(2, 4))
             self.cards_frame.columnconfigure(i, weight=1, uniform="metric")
 
-        setup = ttk.LabelFrame(self.dashboard_frame, text="🚀 ابدأ إعداد مدرستك", padding=(10, 9), style="Card.TLabelframe")
+        setup = ttk.LabelFrame(self.dashboard_inner, text="🚀 ابدأ إعداد مدرستك", padding=(10, 9), style="Card.TLabelframe")
         setup.pack(fill="x", pady=(0, 12))
         steps = [
             ("🏫 بيانات المدرسة", "اسم المدرسة والسنة الدراسية", 11),
@@ -2078,7 +2567,7 @@ class SchoolApp:
             ttk.Button(card, text="فتح القسم ←", style="Step.TButton", command=lambda idx=page_index: self.show_page(idx)).pack(fill="x")
             setup.columnconfigure(col, weight=1, uniform="setup")
 
-        quick = ttk.LabelFrame(self.dashboard_frame, text="⚡ الوصول السريع", padding=(10, 8), style="Card.TLabelframe")
+        quick = ttk.LabelFrame(self.dashboard_inner, text="⚡ الوصول السريع", padding=(10, 8), style="Card.TLabelframe")
         quick.pack(fill="x", pady=(0, 10))
         shortcuts = [
             ("➕ إضافة طالب", 4), ("✅ تسجيل الحضور", 5), ("🗓️ عرض جدول الحصص", 7),
@@ -2087,9 +2576,9 @@ class SchoolApp:
         for text, idx in shortcuts:
             ttk.Button(quick, text=text, style="Primary.TButton", command=lambda page=idx: self._dashboard_shortcut(page)).pack(side="right", padx=4, pady=3)
         ttk.Label(
-            self.dashboard_frame,
+            self.dashboard_inner,
             text="🔒 بيانات المدرسة والطلاب تُحفظ محلياً على هذا الجهاز. استخدم النسخ الاحتياطي قبل نقل البرنامج أو استعادة البيانات.",
-            style="Hint.TLabel", anchor="e", justify="right", wraplength=1200
+            style="Hint.TLabel", anchor="e", justify="right", wraplength=850
         ).pack(fill="x", pady=(1, 0))
 
     def _dashboard_shortcut(self, page_index):
@@ -2286,22 +2775,46 @@ class SchoolApp:
         except Exception as exc:
             messagebox.showerror("تعذّر فتح المجلد", str(exc), parent=self.root)
 
-    def _load_theme_mode(self):
-        """Remember the selected theme for this Windows user."""
+    def _load_ui_preferences(self):
+        """Load per-Windows-user theme, font, and color choices safely."""
+        defaults = {"theme_mode": "light", "font_family": "Tahoma", "font_size": 11,
+                    "text_color": "", "accent_color": "", "field_color": "", "panel_color": ""}
         path = DATA_DIR / "ui_preferences.json"
         try:
-            mode = json.loads(path.read_text(encoding="utf-8")).get("theme_mode", "light")
-            return mode if mode in ("light", "dark") else "light"
-        except (OSError, ValueError, AttributeError):
-            return "light"
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                defaults.update({key: raw[key] for key in defaults if key in raw})
+        except (OSError, ValueError, AttributeError, TypeError):
+            pass
+        if defaults.get("theme_mode") not in ("light", "dark"):
+            defaults["theme_mode"] = "light"
+        try:
+            defaults["font_size"] = max(9, min(18, int(defaults.get("font_size", 11))))
+        except (TypeError, ValueError):
+            defaults["font_size"] = 11
+        for key in ("text_color", "accent_color", "field_color", "panel_color"):
+            value = defaults.get(key, "")
+            if value and not (isinstance(value, str) and re.fullmatch(r"#[0-9A-Fa-f]{6}", value)):
+                defaults[key] = ""
+        return defaults
 
-    def _save_theme_mode(self):
+    def _load_theme_mode(self):
+        return self.appearance_preferences.get("theme_mode", "light")
+
+    def _save_ui_preferences(self):
         try:
             (DATA_DIR / "ui_preferences.json").write_text(
-                json.dumps({"theme_mode": self.theme_mode}, ensure_ascii=False, indent=2), encoding="utf-8"
+                json.dumps(self.appearance_preferences, ensure_ascii=False, indent=2), encoding="utf-8"
             )
-        except OSError:
-            pass
+        except OSError as exc:
+            messagebox.showwarning("حفظ الإعدادات", f"تم تطبيق الاختيار مؤقتاً، لكن تعذّر حفظه على القرص:\n{exc}", parent=self.root)
+
+    def _save_theme_mode(self):
+        self.appearance_preferences["theme_mode"] = self.theme_mode
+        self._save_ui_preferences()
+
+    def open_appearance_settings(self):
+        AppearanceSettingsDialog(self)
 
     @staticmethod
     def _update_repository():
@@ -2509,9 +3022,9 @@ def show_splash_screen(root, duration_ms=2400):
             tk.Label(main, text="🎓", font=("Segoe UI Emoji", 58), fg="#F4C45E", bg="#102D49").pack(pady=(0, 8))
     else:
         tk.Label(main, text="🎓", font=("Segoe UI Emoji", 58), fg="#F4C45E", bg="#102D49").pack(pady=(0, 8))
-    tk.Label(main, text="مدرستي Pro", font=("Segoe UI", 28, "bold"), fg="#FFFFFF", bg="#102D49").pack(pady=(0, 3))
-    tk.Label(main, text="نظام إدارة المدارس العراقية", font=("Segoe UI", 14, "bold"), fg="#D2E4F0", bg="#102D49").pack(pady=(0, 5))
-    tk.Label(main, text=f"النسخة {APP_VERSION}  •  الطلاب  •  المدرسون  •  الحضور  •  الجداول", font=("Segoe UI", 10), fg="#F4C45E", bg="#102D49").pack(pady=(0, 17))
+    tk.Label(main, text="مدرستي Pro", font=("Tahoma", 28, "bold"), fg="#FFFFFF", bg="#102D49").pack(pady=(0, 3))
+    tk.Label(main, text="نظام إدارة المدارس العراقية", font=("Tahoma", 14, "bold"), fg="#D2E4F0", bg="#102D49").pack(pady=(0, 5))
+    tk.Label(main, text=f"النسخة {APP_VERSION}  •  الطلاب  •  المدرسون  •  الحضور  •  الجداول", font=("Tahoma", 10), fg="#F4C45E", bg="#102D49").pack(pady=(0, 17))
     progress = tk.Canvas(main, width=380, height=7, bg="#1D4966", highlightthickness=0, bd=0)
     progress.pack()
     fill = progress.create_rectangle(0, 0, 0, 7, fill="#20B7A7", outline="")

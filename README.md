@@ -1,6 +1,6 @@
 # مدرستي Pro — نظام إدارة المدارس
 
-تطبيق Windows مكتبي لإدارة المدرسة العراقية. الإصدار 1.2.0 يضيف لوحة رئيسية ملوّنة، قائمة جانبية ثابتة، شاشة ترحيب بشعار البرنامج، تحسين عرض العربية، وتوضيح خطوات إعداد المدرسة والجداول الفارغة.
+تطبيق Windows مكتبي لإدارة المدرسة العراقية. الإصدار 1.3.0 يعالج مشكلة عرض النص العربي الناتجة عن إعادة ترتيب الحروف مرتين، ويضيف إعدادات للخط والحجم وألوان النص والحقول والبطاقات، ومعاينة صور الأرشيف والطباعة المباشرة للقوائم والتقارير.
 
 ## الأقسام والجداول
 
@@ -28,12 +28,12 @@ python -m unittest discover -s tests -v
 
 للتشغيل المباشر من مصدر Python، ثبّت الاعتماديات الواردة في `requirements.txt`. أما ملف التثبيت النهائي فيُبنى على Windows عبر GitHub Actions أو `build_windows.bat`.
 
-## نشر الإصدار 1.2.0
+## نشر الإصدار 1.3.0
 
 1. انسخ ملفات هذا المشروع إلى مجلد المستودع المحلي `MadrasatiPro-Updates` مع الحفاظ على مجلد `.git` المخفي.
-2. من GitHub Desktop، أدخل ملخص commit مثل `Upgrade Madrasati Pro UI to 1.2.0` ثم اضغط **Commit to main** و**Push origin**.
-3. من GitHub > Actions > **Build and publish Madrasati Pro update** اضغط **Run workflow** واستخدم `1.2.0`.
-4. بعد ظهور Success، افتح Releases وتأكد من وجود `SchoolManagerPro_Setup_1.2.0.exe` وملف `.sha256`.
+2. من GitHub Desktop، أدخل ملخص commit مثل `Fix Arabic rendering and add settings, photos, and printing in 1.3.0` ثم اضغط **Commit to main** و**Push origin**.
+3. من GitHub > Actions > **Build and publish Madrasati Pro update** اضغط **Run workflow** واستخدم `1.3.0`.
+4. بعد ظهور Success، افتح Releases وتأكد من وجود `SchoolManagerPro_Setup_1.3.0.exe` وملف `.sha256`.
 5. اختبر التثبيت على جهازك قبل توزيع التحديث على المدارس. النسخة القديمة تحتاج هذا التثبيت الأول؛ بعد ذلك تستطيع النسخ المدعومة فحص الإصدارات الجديدة من زر «تحديث البرنامج».
 
 زر «تحديث البرنامج» يستقبل إصداراً منشوراً ولا ينشر تعديلات الكود بحد ذاته. يتم النشر من GitHub Actions.

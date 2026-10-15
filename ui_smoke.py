@@ -6,11 +6,15 @@ import tkinter as tk
 import school_manager
 root = tk.Tk()
 app = school_manager.SchoolApp(root, {"full_name": "اختبار واجهة", "is_admin": True})
-root.geometry("1500x940+10+10")
+root.geometry("1200x800+10+10")
 root.update_idletasks(); root.update()
 assert len(app.nav_buttons) == 12, len(app.nav_buttons)
 app.show_page(0); root.update_idletasks(); root.update()
 assert app.notebook.select() == app.notebook.tabs()[0]
+assert hasattr(app, "dashboard_canvas"), "dashboard should be scrollable"
+settings_dialog = school_manager.AppearanceSettingsDialog(app)
+assert {"font_family", "font_size", "text_color", "accent_color", "field_color", "panel_color"}.issubset(settings_dialog.vars)
+settings_dialog.win.destroy()
 for page in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11):
     app.show_page(page); root.update_idletasks(); root.update()
     assert app.notebook.select() == app.notebook.tabs()[page], page
