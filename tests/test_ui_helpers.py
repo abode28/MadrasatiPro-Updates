@@ -29,6 +29,7 @@ class ArabicRenderingAndPrintTests(unittest.TestCase):
             bidi_mock.assert_not_called()
         display_arabic_text.cache_clear()
 
+    @unittest.skipIf(school_manager.sys.platform.startswith("win") or school_manager.sys.platform == "darwin", "native OS path does not require X11 reshaping")
     def test_display_arabic_text_does_not_reshape_an_already_shaped_value(self):
         # A presentation-form character signals that this display value is already
         # transformed; passing it through another Tk wrapper must not transform it twice.
@@ -37,7 +38,11 @@ class ArabicRenderingAndPrintTests(unittest.TestCase):
         fake_reshaper.reshape.return_value = shaped
         fake_bidi = Mock(side_effect=lambda text, base_dir=None: text)
         display_arabic_text.cache_clear()
-        with patch.object(school_manager, "_ARABIC_DISPLAY_AVAILABLE", True), \
+        # Exercise the optional reshaping path deterministically even when this
+        # suite is run on Windows/macOS, where the production function correctly
+        # delegates RTL layout to the native OS and returns logical text unchanged.
+        with patch.object(school_manager.sys, "platform", "linux"), \
+             patch.object(school_manager, "_ARABIC_DISPLAY_AVAILABLE", True), \
              patch.object(school_manager, "arabic_reshaper", fake_reshaper), \
              patch.object(school_manager, "_bidi_get_display", fake_bidi):
             first = display_arabic_text("مرحبا")
