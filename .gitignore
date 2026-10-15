@@ -1,8 +1,19 @@
+# Python/build output
 .venv-build/
 __pycache__/
 *.py[cod]
 build/
 dist/
 dist-installer/
-SchoolData/
 *.log
+
+# Local school data: never publish real student information
+SchoolData/
+attachments/
+backups/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+*Backup*.zip

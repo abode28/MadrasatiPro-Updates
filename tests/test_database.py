@@ -69,6 +69,36 @@ class SchoolDatabaseSmokeTests(unittest.TestCase):
         self.assertTrue(verify_password("Strong-Test-Pass_2026", salt, digest))
         self.assertFalse(verify_password("wrong-password", salt, digest))
 
+
+    def test_editable_student_teacher_and_timetable_records(self):
+        class_id = self.db.execute(
+            "INSERT INTO classes(grade,section,academic_year) VALUES(?,?,?)",
+            ("الثاني المتوسط", "ب", "2026-2027"),
+        )
+        teacher_id = self.db.execute(
+            "INSERT INTO teachers(employee_no,full_name,specialization) VALUES(?,?,?)",
+            ("T-020", "مدرس تجريبي", "علوم"),
+        )
+        subject_id = self.db.execute(
+            "INSERT INTO subjects(name,grade,teacher_id) VALUES(?,?,?)",
+            ("العلوم", "الثاني المتوسط", teacher_id),
+        )
+        student_id = self.db.execute(
+            "INSERT INTO students(student_no,full_name,class_id) VALUES(?,?,?)",
+            ("S-020", "اسم أول", class_id),
+        )
+        timetable_id = self.db.execute(
+            "INSERT INTO timetable(class_id,day,period_no,start_time,end_time,subject_id,teacher_id,room) VALUES(?,?,?,?,?,?,?,?)",
+            (class_id, "الأحد", 1, "08:00", "08:40", subject_id, teacher_id, "1"),
+        )
+        # The editable forms update the selected records rather than creating duplicates.
+        self.db.execute("UPDATE students SET full_name=? WHERE id=?", ("اسم معدل", student_id))
+        self.db.execute("UPDATE teachers SET specialization=? WHERE id=?", ("فيزياء", teacher_id))
+        self.db.execute("UPDATE timetable SET room=? WHERE id=?", ("مختبر 2", timetable_id))
+        self.assertEqual(self.db.one("SELECT full_name FROM students WHERE id=?", (student_id,))["full_name"], "اسم معدل")
+        self.assertEqual(self.db.one("SELECT specialization FROM teachers WHERE id=?", (teacher_id,))["specialization"], "فيزياء")
+        self.assertEqual(self.db.one("SELECT room FROM timetable WHERE id=?", (timetable_id,))["room"], "مختبر 2")
+
     def test_database_backup_is_valid(self):
         backup_path = Path(self.temp.name) / "backup.db"
         self.db.backup(backup_path)

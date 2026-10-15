@@ -6,12 +6,12 @@ on:
       version:
         description: "رقم الإصدار الجديد، مثل 1.0.1"
         required: true
-        default: "1.1.0"
+        default: "1.2.0"
         type: string
       release_notes:
         description: "ملخص التحديث (اختياري)"
         required: false
-        default: "تحسينات الواجهة وإصلاحات البرنامج"
+        default: "واجهة مدرسية جديدة بالألوان والأيقونات، شاشة ترحيب، جداول قابلة للتحرير وتحسين عرض العربية"
         type: string
   push:
     tags:
@@ -92,7 +92,7 @@ jobs:
           tag_name: ${{ steps.meta.outputs.tag }}
           name: Madrasati Pro ${{ steps.meta.outputs.tag }}
           generate_release_notes: true
-          body: ${{ inputs.release_notes || 'تحسينات الواجهة وإصلاحات البرنامج' }}
+          body: ${{ inputs.release_notes || 'واجهة مدرسية جديدة بالألوان والأيقونات، شاشة ترحيب، جداول قابلة للتحرير وتحسين عرض العربية' }}
           files: |
             dist-installer/SchoolManagerPro_Setup_${{ steps.meta.outputs.version }}.exe
             dist-installer/SchoolManagerPro_Setup_${{ steps.meta.outputs.version }}.exe.sha256
