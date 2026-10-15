@@ -1,0 +1,99 @@
+name: Build and publish Madrasati Pro update
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "رقم الإصدار الجديد، مثل 1.0.1"
+        required: true
+        default: "1.1.0"
+        type: string
+      release_notes:
+        description: "ملخص التحديث (اختياري)"
+        required: false
+        default: "تحسينات الواجهة وإصلاحات البرنامج"
+        type: string
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - name: Get project source
+        uses: actions/checkout@v4
+
+      - name: Choose and validate release version
+        id: meta
+        shell: pwsh
+        env:
+          RELEASE_EVENT: ${{ github.event_name }}
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          if ($env:RELEASE_EVENT -eq "workflow_dispatch") {
+            $version = $env:REQUESTED_VERSION.Trim()
+          } else {
+            $version = "${{ github.ref_name }}".Trim()
+            if ($version.StartsWith("v")) { $version = $version.Substring(1) }
+          }
+          if ($version -notmatch '^\d+\.\d+\.\d+$') { throw "Version must be in x.y.z format, e.g. 1.0.1" }
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "tag=v$version" >> $env:GITHUB_OUTPUT
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Apply release version and update source
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ steps.meta.outputs.version }}
+          REPOSITORY_NAME: ${{ github.repository }}
+        run: |
+          python scripts/set_release_metadata.py "$env:RELEASE_VERSION" "$env:REPOSITORY_NAME"
+
+      - name: Install build tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-build.txt
+
+      - name: Check source and database tests
+        run: |
+          python -m py_compile school_manager.py updater.py
+          python -m unittest discover -s tests -v
+
+      - name: Build Windows application
+        run: pyinstaller --clean --noconfirm school_manager_pro.spec
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup --no-progress -y
+
+      - name: Build installer
+        shell: cmd
+        run: '"C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\SchoolManagerPro.iss'
+
+      - name: Create SHA-256 checksum
+        shell: pwsh
+        run: |
+          $installer = "dist-installer/SchoolManagerPro_Setup_${{ steps.meta.outputs.version }}.exe"
+          if (!(Test-Path $installer)) { throw "Installer was not created: $installer" }
+          $hash = (Get-FileHash -Algorithm SHA256 $installer).Hash.ToLower()
+          "$hash  SchoolManagerPro_Setup_${{ steps.meta.outputs.version }}.exe" | Out-File -Encoding ascii "$installer.sha256"
+
+      - name: Publish update release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: Madrasati Pro ${{ steps.meta.outputs.tag }}
+          generate_release_notes: true
+          body: ${{ inputs.release_notes || 'تحسينات الواجهة وإصلاحات البرنامج' }}
+          files: |
+            dist-installer/SchoolManagerPro_Setup_${{ steps.meta.outputs.version }}.exe
+            dist-installer/SchoolManagerPro_Setup_${{ steps.meta.outputs.version }}.exe.sha256
+          fail_on_unmatched_files: true

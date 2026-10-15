@@ -1,0 +1,13 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "تشغيل مدرستي Pro",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/school_manager.py",
+      "console": "integratedTerminal",
+      "justMyCode": true
+    }
+  ]
+}

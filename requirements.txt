@@ -1,0 +1,2 @@
+# تطبيق مدرستي Pro لا يحتاج مكتبات Python خارجية للتشغيل.
+# SQLite وTkinter وCSV وZIP جزء من Python القياسي.

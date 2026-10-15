@@ -1,0 +1,8 @@
+.venv-build/
+__pycache__/
+*.py[cod]
+build/
+dist/
+dist-installer/
+SchoolData/
+*.log
